@@ -3,8 +3,18 @@ services:
     build: .
     container_name: ditri_ai_bot
     restart: unless-stopped
-    env_file:
-      - ./env/ai-bot.env
+    environment:
+      - DISCORD_TOKEN
+      - TELEGRAM_TOKEN
+      - API_URL
+      - API_KEY
+      - API_MODEL
+      - API_TIMEOUT
+      - SYSTEM_PROMPT
+      - MAX_HISTORY
+      - RATE_LIMIT_CALLS
+      - RATE_LIMIT_WINDOW
+      - LOG_LEVEL
     volumes:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
