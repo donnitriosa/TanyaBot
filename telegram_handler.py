@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from typing import TYPE_CHECKING
 
+import markdown
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from exceptions import ConfigError, LLMClientError, PlatformError
 
 if TYPE_CHECKING:
     from ai_client import AIClient
+    from rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +24,155 @@ _history: dict[int, list[dict]] = {}
 
 _SYSTEM_PROMPT: str | None = None
 _MAX_HISTORY: int = 10
+_rate_limiter: RateLimiter | None = None
 _startup_time: datetime = datetime.now(tz=timezone.utc)
+
+
+class TelegramHTMLSanitizer(HTMLParser):
+    """Sanitises raw HTML to conform strictly to Telegram's HTML styling support.
+
+    Whitelisted tags: <b>, <i>, <code>, <pre>, <a>, <u>, <s>.
+    All other tags are stripped, but their text content is preserved.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.result: list[str] = []
+        self._whitelist = {"b", "strong", "i", "em", "code", "pre", "a", "u", "ins", "s", "strike", "del"}
+        self._list_item_count = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # Convert strong/em to b/i for simplicity
+        if tag == "strong":
+            tag = "b"
+        elif tag == "em":
+            tag = "i"
+        elif tag == "ins":
+            tag = "u"
+        elif tag in {"strike", "del"}:
+            tag = "s"
+
+        if tag in self._whitelist:
+            attr_str = ""
+            # Only allow href attribute for <a> tags
+            if tag == "a":
+                href = next((val for name, val in attrs if name == "href"), None)
+                if href:
+                    attr_str = f' href="{href}"'
+            self.result.append(f"<{tag}{attr_str}>")
+        elif tag == "li":
+            self.result.append("\n• ")
+        elif tag in {"p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "br"}:
+            self.result.append("\n")
+        elif tag in {"ul", "ol"}:
+            self.result.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "strong":
+            tag = "b"
+        elif tag == "em":
+            tag = "i"
+        elif tag == "ins":
+            tag = "u"
+        elif tag in {"strike", "del"}:
+            tag = "s"
+
+        if tag in self._whitelist:
+            self.result.append(f"</{tag}>")
+        elif tag in {"p", "div", "h1", "h2", "h3", "h4", "h5", "h6"}:
+            self.result.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        self.result.append(data)
+
+    def get_html(self) -> str:
+        raw = "".join(self.result)
+        # Normalize line breaks
+        cleaned = re.sub(r"\n\n+", "\n\n", raw)
+        return cleaned.strip()
+
+
+import re
+
+
+def _md_to_html(text: str) -> str:
+    """Translate standard Markdown elements to safe Telegram HTML formatting.
+
+    Uses python-markdown library and filters output through HTML sanitizer
+    to guarantee zero parsing crashes on Telegram API.
+
+    Args:
+        text: Raw Markdown text.
+
+    Returns:
+        Formatted HTML string matching Telegram constraints.
+    """
+    # Convert MD to HTML using python-markdown
+    html_raw = markdown.markdown(text, extensions=["fenced_code"])
+
+    # Sanitise HTML
+    parser = TelegramHTMLSanitizer()
+    parser.feed(html_raw)
+    return parser.get_html()
+
+
+def _chunk_markdown(text: str, limit: int = 4000) -> list[str]:
+    """Split markdown text into chunks, keeping code blocks intact where possible.
+
+    Fences (```) are added to split code blocks to prevent syntax errors.
+
+    Args:
+        text: Raw Markdown text.
+        limit: Max character length per chunk.
+
+    Returns:
+        List of chunks.
+    """
+    lines = text.split("\n")
+    chunks: list[str] = []
+    current_chunk: list[str] = []
+    current_len = 0
+    in_code = False
+    code_lang = ""
+
+    for line in lines:
+        is_fence = line.strip().startswith("```")
+
+        # Check if we must append closing fence to current chunk anyway
+        if is_fence and in_code:
+            current_chunk.append(line)
+            current_len += len(line) + 1
+            in_code = False
+            code_lang = ""
+            continue
+
+        # If adding exceeds limit, split
+        if current_len + len(line) + 1 > limit:
+            if in_code:
+                # Close code block in current chunk
+                current_chunk.append("```")
+                chunks.append("\n".join(current_chunk))
+                # Start new chunk and reopen code block
+                current_chunk = [f"```{code_lang}", line]
+                current_len = len(current_chunk[0]) + len(line) + 2
+            else:
+                if current_chunk:
+                    chunks.append("\n".join(current_chunk))
+                current_chunk = [line]
+                current_len = len(line)
+                if is_fence:
+                    in_code = True
+                    code_lang = line.strip()[3:]
+        else:
+            current_chunk.append(line)
+            current_len += len(line) + 1
+            if is_fence:
+                in_code = True
+                code_lang = line.strip()[3:]
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+    return chunks
 
 
 def _get_system_prompt() -> str:
@@ -75,15 +227,25 @@ async def _cmd_tanya(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     if not context.args:
         await update.message.reply_text(
-            "Kasih pertanyaannya dong! Contoh: `/tanya apa itu AI?`",
-            parse_mode="Markdown",
+            "Kasih pertanyaannya dong! Contoh: <code>/tanya apa itu AI?</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    ai_client: AIClient = context.bot_data["ai_client"]
+    if _rate_limiter is None:
+        raise PlatformError("RateLimiter belum dikonfigurasi di telegram bot", platform="telegram")
+
+    user_id = update.effective_user.id
+
+    allowed, retry_after = _rate_limiter.is_allowed("telegram", user_id)
+    if not allowed:
+        await update.message.reply_text(
+            f"Sabar ya, kamu sudah terlalu banyak bertanya. Coba lagi dalam {retry_after} detik."
         )
         return
 
     pertanyaan = " ".join(context.args)
-    user_id = update.effective_user.id
-
-    ai_client: AIClient = context.bot_data["ai_client"]
     _ensure_history(user_id)
     _append_and_evict(user_id, "user", pertanyaan)
 
@@ -100,12 +262,11 @@ async def _cmd_tanya(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     _append_and_evict(user_id, "assistant", jawaban)
     logger.info("[TELEGRAM] Menjawab user %d (%d chars)", user_id, len(jawaban))
 
-    # Chunk jika melebihi batas 4096 char Telegram
-    if len(jawaban) > 4096:
-        for i in range(0, len(jawaban), 4096):
-            await update.message.reply_text(jawaban[i : i + 4096])
-    else:
-        await update.message.reply_text(jawaban)
+    # Chunk the raw markdown first, then translate each chunk to HTML
+    chunks = _chunk_markdown(jawaban, limit=4000)
+    for chunk in chunks:
+        html_chunk = _md_to_html(chunk)
+        await update.message.reply_text(html_chunk, parse_mode=ParseMode.HTML)
 
 
 async def _cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -125,7 +286,7 @@ async def _cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def _cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /info — tampilkan model aktif dan uptime.
+    """Handle /info — tampilkan model aktif, uptime, dan total pesan diproses.
 
     Args:
         update: Incoming Telegram update.
@@ -139,12 +300,16 @@ async def _cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     hours, remainder = divmod(int(uptime.total_seconds()), 3600)
     minutes, seconds = divmod(remainder, 60)
 
+    uptime_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    processed = ai_client.processed_messages
+
     teks = (
-        f"🤖 *AI Bot Info*\n"
-        f"Model: `{ai_client.model}`\n"
-        f"Uptime: `{hours:02d}:{minutes:02d}:{seconds:02d}`"
+        f"🤖 <b>AI Bot Info</b>\n\n"
+        f"• Model: <code>{ai_client.model}</code>\n"
+        f"• Uptime: <code>{uptime_str}</code>\n"
+        f"• Pesan Diproses: <code>{processed}</code>"
     )
-    await update.message.reply_text(teks, parse_mode="Markdown")
+    await update.message.reply_text(teks, parse_mode=ParseMode.HTML)
 
 
 def setup_application(
@@ -152,6 +317,7 @@ def setup_application(
     ai_client: AIClient,
     system_prompt: str,
     max_history: int,
+    rate_limiter: RateLimiter,
 ) -> Application:
     """Create and configure the PTB Application instance.
 
@@ -163,6 +329,7 @@ def setup_application(
         ai_client: Shared LLM client instance.
         system_prompt: Text injected as system message for every user.
         max_history: Maximum non-system messages stored per user.
+        rate_limiter: RateLimiter instance shared across platforms.
 
     Returns:
         Configured telegram.ext.Application instance.
@@ -171,7 +338,7 @@ def setup_application(
         ConfigError: If arguments are invalid.
         PlatformError: If the token is rejected by Telegram.
     """
-    global _SYSTEM_PROMPT, _MAX_HISTORY, _startup_time  # noqa: PLW0603
+    global _SYSTEM_PROMPT, _MAX_HISTORY, _rate_limiter, _startup_time  # noqa: PLW0603
 
     if not telegram_token:
         raise ConfigError("TELEGRAM_TOKEN tidak boleh kosong")
@@ -182,6 +349,7 @@ def setup_application(
 
     _SYSTEM_PROMPT = system_prompt
     _MAX_HISTORY = max_history
+    _rate_limiter = rate_limiter
     _startup_time = datetime.now(tz=timezone.utc)
 
     try:

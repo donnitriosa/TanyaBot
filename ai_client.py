@@ -107,12 +107,18 @@ class AIClient:
             },
             timeout=api_timeout,
         )
+        self._processed_messages = 0
         logger.info("AIClient diinisialisasi — model: %s", api_model)
 
     @property
     def model(self) -> str:
         """Active model identifier."""
         return self._api_model
+
+    @property
+    def processed_messages(self) -> int:
+        """Get the number of successfully processed messages since startup."""
+        return self._processed_messages
 
     async def chat(self, messages: list[dict]) -> str:
         """Send messages to the LLM and return the assistant's reply.
@@ -153,7 +159,9 @@ class AIClient:
                         continue
                     raise exc
 
-                return _parse_response(response.json())
+                reply = _parse_response(response.json())
+                self._processed_messages += 1
+                return reply
 
             except (httpx.TimeoutException, httpx.ConnectError) as exc:
                 if attempt < _RETRY_MAX:

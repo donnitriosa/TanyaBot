@@ -15,6 +15,11 @@ services:
       - RATE_LIMIT_CALLS
       - RATE_LIMIT_WINDOW
       - LOG_LEVEL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     volumes:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro

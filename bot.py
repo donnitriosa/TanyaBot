@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from ai_client import AIClient
 from discord_handler import setup_handler as setup_discord
 from exceptions import ConfigError
+from rate_limiter import RateLimiter
 from telegram_handler import setup_application as setup_telegram
 
 if TYPE_CHECKING:
@@ -87,6 +88,36 @@ def _load_handler_config() -> tuple[str, int]:
     return system_prompt, max_history
 
 
+def _load_rate_limit_config() -> tuple[int, int]:
+    """Read RATE_LIMIT_CALLS and RATE_LIMIT_WINDOW from env.
+
+    Returns:
+        Tuple of (calls, window_seconds).
+
+    Raises:
+        ConfigError: If variables are missing or invalid.
+    """
+    calls_raw = os.getenv("RATE_LIMIT_CALLS", "5")
+    window_raw = os.getenv("RATE_LIMIT_WINDOW", "60")
+
+    try:
+        calls = int(calls_raw)
+    except ValueError as exc:
+        raise ConfigError(f"RATE_LIMIT_CALLS bukan integer valid: {calls_raw!r}") from exc
+
+    try:
+        window = int(window_raw)
+    except ValueError as exc:
+        raise ConfigError(f"RATE_LIMIT_WINDOW bukan integer valid: {window_raw!r}") from exc
+
+    if calls < 1:
+        raise ConfigError(f"RATE_LIMIT_CALLS harus >= 1, dapat: {calls}")
+    if window < 1:
+        raise ConfigError(f"RATE_LIMIT_WINDOW harus >= 1, dapat: {window}")
+
+    return calls, window
+
+
 async def _run_bots(
     discord_bot: commands.Bot,
     discord_token: str,
@@ -152,10 +183,16 @@ async def main() -> None:
     discord_token = _load_discord_token()
     telegram_token = _load_telegram_token()
     system_prompt, max_history = _load_handler_config()
+    calls, window = _load_rate_limit_config()
 
     ai_client = AIClient()
+    rate_limiter = RateLimiter(calls=calls, window=window)
 
-    discord_bot = setup_discord(system_prompt=system_prompt, max_history=max_history)
+    discord_bot = setup_discord(
+        system_prompt=system_prompt,
+        max_history=max_history,
+        rate_limiter=rate_limiter,
+    )
     discord_bot.ai_client = ai_client  # type: ignore[attr-defined]
 
     telegram_app = setup_telegram(
@@ -163,6 +200,7 @@ async def main() -> None:
         ai_client=ai_client,
         system_prompt=system_prompt,
         max_history=max_history,
+        rate_limiter=rate_limiter,
     )
 
     try:
