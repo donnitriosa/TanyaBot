@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Env & secrets
+env/ai-bot.env
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

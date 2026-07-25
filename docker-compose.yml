@@ -1,0 +1,22 @@
+services:
+  discord-ai-bot:
+    build: .
+    container_name: ditri_ai_bot
+    restart: unless-stopped
+    env_file:
+      - ./env/ai-bot.env
+    volumes:
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      - internal_net
+
+networks:
+  internal_net:
+    name: internal_net
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: 1280
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
