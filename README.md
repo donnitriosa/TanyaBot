@@ -19,12 +19,11 @@ TanyaBot adalah chatbot bridge multi-platform terpadu untuk **Discord** dan **Te
 ### Discord Bot
 - `!tanya <pertanyaan>` atau `/tanya <pertanyaan>`: Tanya sesuatu ke AI.
 - `!reset` atau `/reset`: Hapus riwayat chat kamu di Discord.
-- `!info` atau `/info`: Menampilkan model aktif, uptime bot, dan jumlah pesan diproses.
 
 ### Telegram Bot
 - `/tanya <pertanyaan>`: Tanya sesuatu ke AI.
 - `/reset`: Hapus riwayat chat kamu di Telegram.
-- `/info`: Menampilkan info bot, uptime, dan total pesan sukses diproses.
+- `/info`: Menampilkan info bot (detail model aktif, uptime, dan total pesan hanya untuk `TELEGRAM_ADMIN_ID`; user lain mendapat info umum).
 
 ---
 
@@ -36,6 +35,7 @@ Salin `env/ai-bot.env.example` ke `env/ai-bot.env` dan sesuaikan nilainya:
 |---|---|---|
 | `DISCORD_TOKEN` | Token bot Discord dari Developer Portal | *Wajib* |
 | `TELEGRAM_TOKEN` | Token bot Telegram dari @BotFather | *Wajib* |
+| `TELEGRAM_ADMIN_ID` | Telegram User ID admin untuk akses detail `/info` (bisa pisah koma) | *Opsional* |
 | `API_URL` | Endpoint URL LLM API (compatible OpenAI) | *Wajib* |
 | `API_KEY` | Kunci otorisasi LLM API | *Wajib* |
 | `API_MODEL` | ID model LLM yang aktif digunakan | `gpt-4o-mini` |

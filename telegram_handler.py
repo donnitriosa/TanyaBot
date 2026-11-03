@@ -33,6 +33,7 @@ _reset_seq: dict[int, int] = {}
 _SYSTEM_PROMPT: str | None = None
 _MAX_HISTORY: int = 10
 _rate_limiter: RateLimiter | None = None
+_admin_user_ids: set[int] = set()
 _startup_time: datetime = datetime.now(tz=timezone.utc)
 
 
@@ -366,13 +367,17 @@ async def _cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def _cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /info — tampilkan model aktif, uptime, dan total pesan diproses.
+    """Handle /info — tampilkan info detail untuk admin ID, atau info umum untuk user lain.
 
     Args:
         update: Incoming Telegram update.
         context: PTB context carrying bot_data with ai_client.
     """
-    if not update.message:
+    if not update.message or not update.effective_user:
+        return
+
+    if update.effective_user.id not in _admin_user_ids:
+        await update.message.reply_text("Saya adalah TanyaBot, asisten AI yang membantu.")
         return
 
     ai_client: AIClient = context.bot_data["ai_client"]
@@ -382,10 +387,11 @@ async def _cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     uptime_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     processed = ai_client.processed_messages
+    safe_model = html.escape(ai_client.model)
 
     teks = (
         f"🤖 <b>AI Bot Info</b>\n\n"
-        f"• Model: <code>********</code>\n"
+        f"• Model: <code>{safe_model}</code>\n"
         f"• Uptime: <code>{uptime_str}</code>\n"
         f"• Pesan Diproses: <code>{processed}</code>"
     )
@@ -398,6 +404,7 @@ def setup_application(
     system_prompt: str,
     max_history: int,
     rate_limiter: RateLimiter,
+    admin_user_ids: set[int] | None = None,
 ) -> Application:
     """Create and configure the PTB Application instance.
 
@@ -410,6 +417,7 @@ def setup_application(
         system_prompt: Text injected as system message for every user.
         max_history: Maximum non-system messages stored per user.
         rate_limiter: RateLimiter instance shared across platforms.
+        admin_user_ids: Allowed Telegram user IDs that can view full /info details.
 
     Returns:
         Configured telegram.ext.Application instance.
@@ -418,7 +426,7 @@ def setup_application(
         ConfigError: If arguments are invalid.
         PlatformError: If the token is rejected by Telegram.
     """
-    global _SYSTEM_PROMPT, _MAX_HISTORY, _rate_limiter, _startup_time  # noqa: PLW0603
+    global _SYSTEM_PROMPT, _MAX_HISTORY, _rate_limiter, _admin_user_ids, _startup_time  # noqa: PLW0603
 
     if not telegram_token:
         raise ConfigError("TELEGRAM_TOKEN tidak boleh kosong")
@@ -430,6 +438,7 @@ def setup_application(
     _SYSTEM_PROMPT = system_prompt
     _MAX_HISTORY = max_history
     _rate_limiter = rate_limiter
+    _admin_user_ids = set(admin_user_ids) if admin_user_ids else set()
     _startup_time = datetime.now(tz=timezone.utc)
 
     try:

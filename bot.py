@@ -68,6 +68,31 @@ def _load_telegram_token() -> str:
     return token
 
 
+def _load_telegram_admin_ids() -> set[int]:
+    """Read TELEGRAM_ADMIN_ID from env (single ID or comma-separated IDs).
+
+    Returns:
+        Set of integer Telegram user IDs allowed to view full /info details.
+
+    Raises:
+        ConfigError: If any configured ID is not a valid integer.
+    """
+    raw = os.getenv("TELEGRAM_ADMIN_ID", "").strip()
+    if not raw:
+        return set()
+
+    admin_ids: set[int] = set()
+    for part in raw.split(","):
+        cleaned = part.strip()
+        if not cleaned:
+            continue
+        try:
+            admin_ids.add(int(cleaned))
+        except ValueError as exc:
+            raise ConfigError(f"TELEGRAM_ADMIN_ID bukan integer valid: {cleaned!r}") from exc
+    return admin_ids
+
+
 def _load_handler_config() -> tuple[str, int]:
     """Read SYSTEM_PROMPT and MAX_HISTORY from env.
 
@@ -204,6 +229,7 @@ async def main() -> None:
 
     discord_token = _load_discord_token()
     telegram_token = _load_telegram_token()
+    telegram_admin_ids = _load_telegram_admin_ids()
     system_prompt, max_history = _load_handler_config()
     calls, window = _load_rate_limit_config()
 
@@ -223,6 +249,7 @@ async def main() -> None:
         system_prompt=system_prompt,
         max_history=max_history,
         rate_limiter=rate_limiter,
+        admin_user_ids=telegram_admin_ids,
     )
 
     try:

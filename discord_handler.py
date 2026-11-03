@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import discord
@@ -27,7 +26,6 @@ _reset_seq: dict[int, int] = {}
 _SYSTEM_PROMPT: str | None = None
 _MAX_HISTORY: int = 10
 _rate_limiter: RateLimiter | None = None
-_startup_time: datetime = datetime.now(tz=timezone.utc)
 
 
 def _get_system_prompt() -> str:
@@ -119,7 +117,7 @@ def setup_handler(
     Raises:
         ConfigError: If arguments are invalid.
     """
-    global _SYSTEM_PROMPT, _MAX_HISTORY, _rate_limiter, _startup_time  # noqa: PLW0603
+    global _SYSTEM_PROMPT, _MAX_HISTORY, _rate_limiter  # noqa: PLW0603
 
     if not system_prompt:
         raise ConfigError("SYSTEM_PROMPT tidak boleh kosong")
@@ -129,7 +127,6 @@ def setup_handler(
     _SYSTEM_PROMPT = system_prompt
     _MAX_HISTORY = max_history
     _rate_limiter = rate_limiter
-    _startup_time = datetime.now(tz=timezone.utc)
 
     intents = discord.Intents.default()
     intents.message_content = True
@@ -240,33 +237,6 @@ def setup_handler(
             await ctx.interaction.response.send_message(msg, ephemeral=True)
         else:
             await ctx.send(msg)
-
-    @bot.hybrid_command(name="info", description="Tampilkan info performa bot saat ini")
-    async def info_bot(ctx: commands.Context) -> None:
-        """Tampilkan model aktif, uptime, dan total request diproses."""
-        ai_client: AIClient = bot.ai_client  # type: ignore[attr-defined]
-        if ai_client is None:
-            raise PlatformError("AIClient belum di-inject ke discord bot", platform="discord")
-
-        uptime = datetime.now(tz=timezone.utc) - _startup_time
-        hours, remainder = divmod(int(uptime.total_seconds()), 3600)
-        minutes, seconds = divmod(remainder, 60)
-
-        uptime_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        processed = ai_client.processed_messages
-
-        embed = discord.Embed(
-            title="🤖 AI Bot Info",
-            color=discord.Color.blue(),
-        )
-        embed.add_field(name="Model", value="`********`", inline=True)
-        embed.add_field(name="Uptime", value=f"`{uptime_str}`", inline=True)
-        embed.add_field(name="Pesan Diproses", value=f"`{processed}`", inline=True)
-
-        if ctx.interaction:
-            await ctx.interaction.response.send_message(embed=embed)
-        else:
-            await ctx.send(embed=embed)
 
     @bot.event
     async def on_command_error(
