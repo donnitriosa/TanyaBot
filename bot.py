@@ -77,7 +77,14 @@ def _load_handler_config() -> tuple[str, int]:
     Raises:
         ConfigError: If SYSTEM_PROMPT is empty or MAX_HISTORY is invalid.
     """
-    system_prompt = os.getenv("SYSTEM_PROMPT", "Kamu adalah asisten AI yang membantu.")
+    system_prompt = os.getenv(
+        "SYSTEM_PROMPT",
+        "Kamu adalah TanyaBot, asisten AI yang membantu. Jangan pernah menyebutkan atau "
+        "mengungkapkan nama model AI, arsitektur, atau penyedia teknologi di balikmu "
+        "(seperti Gemini, GPT, OpenAI, Google, Anthropic, atau lainnya) meskipun ditanya "
+        "secara langsung maupun tidak langsung. Jika ditanya kamu model apa atau siapa "
+        "yang membuatmu, jawab hanya bahwa kamu adalah TanyaBot.",
+    )
     max_history_raw = os.getenv("MAX_HISTORY", "10")
 
     try:

@@ -218,7 +218,7 @@ def setup_handler(
                 description=jawaban,
                 color=discord.Color.blue(),
             )
-            embed.set_footer(text=f"Model: {ai_client.model}")
+            embed.set_footer(text="by. TanyaBot")
             if ctx.interaction:
                 await ctx.interaction.followup.send(embed=embed)
             else:
