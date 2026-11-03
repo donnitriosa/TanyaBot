@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import html
 import logging
+import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING
@@ -8,6 +11,7 @@ from typing import TYPE_CHECKING
 import markdown
 from telegram import Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from exceptions import ConfigError, LLMClientError, PlatformError
@@ -18,9 +22,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MAX_USERS = 1000
+
 # Conversation history keyed by Telegram user_id.
 # Index 0 is always the system prompt — never evicted, never shared with Discord.
 _history: dict[int, list[dict]] = {}
+_user_locks: dict[int, asyncio.Lock] = {}
+_reset_seq: dict[int, int] = {}
 
 _SYSTEM_PROMPT: str | None = None
 _MAX_HISTORY: int = 10
@@ -58,7 +66,7 @@ class TelegramHTMLSanitizer(HTMLParser):
             if tag == "a":
                 href = next((val for name, val in attrs if name == "href"), None)
                 if href:
-                    attr_str = f' href="{href}"'
+                    attr_str = f' href="{html.escape(href, quote=True)}"'
             self.result.append(f"<{tag}{attr_str}>")
         elif tag == "li":
             self.result.append("\n• ")
@@ -83,16 +91,13 @@ class TelegramHTMLSanitizer(HTMLParser):
             self.result.append("\n")
 
     def handle_data(self, data: str) -> None:
-        self.result.append(data)
+        self.result.append(html.escape(data, quote=False))
 
     def get_html(self) -> str:
         raw = "".join(self.result)
         # Normalize line breaks
         cleaned = re.sub(r"\n\n+", "\n\n", raw)
         return cleaned.strip()
-
-
-import re
 
 
 def _md_to_html(text: str) -> str:
@@ -116,7 +121,27 @@ def _md_to_html(text: str) -> str:
     return parser.get_html()
 
 
-def _chunk_markdown(text: str, limit: int = 4000) -> list[str]:
+def _split_long_lines(lines: list[str], limit: int) -> list[str]:
+    """Split any single line exceeding limit into smaller slices.
+
+    Args:
+        lines: Input lines.
+        limit: Max characters per line.
+
+    Returns:
+        List of lines where each non-fence line is at most `limit` chars.
+    """
+    expanded: list[str] = []
+    for line in lines:
+        if len(line) <= limit or line.strip().startswith("```"):
+            expanded.append(line)
+        else:
+            for i in range(0, len(line), limit):
+                expanded.append(line[i : i + limit])
+    return expanded
+
+
+def _chunk_markdown(text: str, limit: int = 3500) -> list[str]:
     """Split markdown text into chunks, keeping code blocks intact where possible.
 
     Fences (```) are added to split code blocks to prevent syntax errors.
@@ -128,7 +153,7 @@ def _chunk_markdown(text: str, limit: int = 4000) -> list[str]:
     Returns:
         List of chunks.
     """
-    lines = text.split("\n")
+    lines = _split_long_lines(text.split("\n"), limit)
     chunks: list[str] = []
     current_chunk: list[str] = []
     current_len = 0
@@ -189,8 +214,33 @@ def _get_system_prompt() -> str:
     return _SYSTEM_PROMPT
 
 
+def _get_user_lock(user_id: int) -> asyncio.Lock:
+    """Return a per-user asyncio.Lock, bounding total stored locks.
+
+    Args:
+        user_id: Telegram user ID.
+
+    Returns:
+        asyncio.Lock for the given user.
+    """
+    lock = _user_locks.get(user_id)
+    if lock is not None:
+        return lock
+
+    if len(_user_locks) >= _MAX_USERS:
+        for old_uid, old_lock in list(_user_locks.items()):
+            if not old_lock.locked():
+                _user_locks.pop(old_uid, None)
+                _reset_seq.pop(old_uid, None)
+                break
+
+    lock = asyncio.Lock()
+    _user_locks[user_id] = lock
+    return lock
+
+
 def _ensure_history(user_id: int) -> None:
-    """Initialise history for a user if not yet present.
+    """Initialise history for a user if not yet present, bounding total users.
 
     Always inserts the system prompt at index 0.
 
@@ -198,6 +248,9 @@ def _ensure_history(user_id: int) -> None:
         user_id: Telegram user ID.
     """
     if user_id not in _history:
+        if len(_history) >= _MAX_USERS:
+            oldest_uid = next(iter(_history))
+            _history.pop(oldest_uid, None)
         _history[user_id] = [{"role": "system", "content": _get_system_prompt()}]
 
 
@@ -209,10 +262,33 @@ def _append_and_evict(user_id: int, role: str, content: str) -> None:
         role: 'user' or 'assistant'.
         content: Message text.
     """
+    _ensure_history(user_id)
     _history[user_id].append({"role": role, "content": content})
     # Index 0 is system prompt — count only indices 1+
     while len(_history[user_id]) - 1 > _MAX_HISTORY:
         _history[user_id].pop(1)
+
+
+async def _send_telegram_chunk(update: Update, raw_chunk: str) -> None:
+    """Send a single markdown chunk rendered as safe HTML with plain-text fallback.
+
+    Args:
+        update: Incoming Telegram update with message.
+        raw_chunk: Markdown chunk string.
+    """
+    if not update.message:
+        return
+
+    html_chunk = _md_to_html(raw_chunk)
+    if len(html_chunk) <= 4096:
+        try:
+            await update.message.reply_text(html_chunk, parse_mode=ParseMode.HTML)
+            return
+        except BadRequest as exc:
+            logger.warning("[TELEGRAM] Fallback ke plain text karena error HTML: %s", exc)
+
+    for i in range(0, len(raw_chunk), 4096):
+        await update.message.reply_text(raw_chunk[i : i + 4096])
 
 
 async def _cmd_tanya(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -246,27 +322,30 @@ async def _cmd_tanya(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     pertanyaan = " ".join(context.args)
-    _ensure_history(user_id)
-    _append_and_evict(user_id, "user", pertanyaan)
-
     await update.message.chat.send_action("typing")
 
-    try:
-        jawaban = await ai_client.chat(_history[user_id])
-    except LLMClientError as exc:
-        logger.error("[TELEGRAM] LLM error untuk user %d: %s", user_id, exc)
-        _history[user_id].pop()
-        await update.message.reply_text("Waduh, gagal dapat respons dari AI. Coba lagi nanti.")
-        return
+    async with _get_user_lock(user_id):
+        seq_before = _reset_seq.get(user_id, 0)
+        _ensure_history(user_id)
+        request_messages = [*_history[user_id], {"role": "user", "content": pertanyaan}]
 
-    _append_and_evict(user_id, "assistant", jawaban)
+        try:
+            jawaban = await ai_client.chat(request_messages)
+        except LLMClientError as exc:
+            logger.error("[TELEGRAM] LLM error untuk user %d: %s", user_id, exc)
+            await update.message.reply_text("Waduh, gagal dapat respons dari AI. Coba lagi nanti.")
+            return
+
+        if _reset_seq.get(user_id, 0) == seq_before:
+            _append_and_evict(user_id, "user", pertanyaan)
+            _append_and_evict(user_id, "assistant", jawaban)
+
     logger.info("[TELEGRAM] Menjawab user %d (%d chars)", user_id, len(jawaban))
 
     # Chunk the raw markdown first, then translate each chunk to HTML
-    chunks = _chunk_markdown(jawaban, limit=4000)
+    chunks = _chunk_markdown(jawaban, limit=3500)
     for chunk in chunks:
-        html_chunk = _md_to_html(chunk)
-        await update.message.reply_text(html_chunk, parse_mode=ParseMode.HTML)
+        await _send_telegram_chunk(update, chunk)
 
 
 async def _cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -280,6 +359,7 @@ async def _cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     user_id = update.effective_user.id
+    _reset_seq[user_id] = _reset_seq.get(user_id, 0) + 1
     _history.pop(user_id, None)
     logger.info("[TELEGRAM] History user %d direset", user_id)
     await update.message.reply_text("History percakapan kamu sudah direset.")
@@ -302,10 +382,11 @@ async def _cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     uptime_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     processed = ai_client.processed_messages
+    safe_model = html.escape(ai_client.model)
 
     teks = (
         f"🤖 <b>AI Bot Info</b>\n\n"
-        f"• Model: <code>{ai_client.model}</code>\n"
+        f"• Model: <code>{safe_model}</code>\n"
         f"• Uptime: <code>{uptime_str}</code>\n"
         f"• Pesan Diproses: <code>{processed}</code>"
     )

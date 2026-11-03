@@ -8,6 +8,8 @@ from exceptions import ConfigError
 
 logger = logging.getLogger(__name__)
 
+_MAX_TRACKED_USERS = 5000
+
 
 class RateLimiter:
     """Sliding window rate limiter for multi-platform users.
@@ -49,12 +51,22 @@ class RateLimiter:
             Tuple of (allowed: bool, retry_after: int). retry_after is 0 if allowed.
         """
         now = time.time()
-        user_history = self._requests[platform][user_id]
-
-        # Evict expired timestamps
+        platform_requests = self._requests[platform]
         cutoff = now - self._window
-        while user_history and user_history[0] < cutoff:
-            user_history.pop(0)
+
+        user_history = platform_requests.get(user_id)
+        if user_history is not None:
+            while user_history and user_history[0] < cutoff:
+                user_history.pop(0)
+            if not user_history:
+                platform_requests.pop(user_id, None)
+                user_history = None
+
+        if user_history is None:
+            if len(platform_requests) >= _MAX_TRACKED_USERS:
+                oldest_uid = next(iter(platform_requests))
+                platform_requests.pop(oldest_uid, None)
+            user_history = platform_requests[user_id]
 
         # Check limit
         if len(user_history) >= self._calls:

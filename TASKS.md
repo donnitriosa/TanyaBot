@@ -8,7 +8,7 @@
 ## Phase 1 — Refactor & Foundation
 
 <!-- setup -->
-- [ ] Buat skeleton folder sesuai Directory Tree di `AGENTS.md` (file kosong, `env/` sudah ada) [[phase-1-skeleton]]
+- [x] Buat skeleton folder sesuai Directory Tree di `AGENTS.md` (file kosong, `env/` sudah ada) [[phase-1-skeleton]]
 
 <!-- implementasi -->
 - [x] Buat `exceptions.py` — custom hierarchy: `BotError` → `ConfigError`, `LLMClientError`, `RateLimitExceeded`, `PlatformError` [[phase-1-exceptions]]

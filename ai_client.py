@@ -81,11 +81,11 @@ def _is_retryable(exc: Exception) -> bool:
         exc: The caught exception.
 
     Returns:
-        True for 5xx status codes and timeout/connection errors.
+        True for 5xx status codes and transport/timeout/connection errors.
     """
     if isinstance(exc, LLMClientError) and exc.status_code is not None:
         return exc.status_code >= 500
-    return isinstance(exc, (httpx.TimeoutException, httpx.ConnectError))
+    return isinstance(exc, httpx.TransportError)
 
 
 class AIClient:
@@ -108,7 +108,7 @@ class AIClient:
             timeout=api_timeout,
         )
         self._processed_messages = 0
-        logger.info("AIClient diinisialisasi — model: %s", api_model)
+        logger.info("[AI_CLIENT] AIClient diinisialisasi — model: %s", api_model)
 
     @property
     def model(self) -> str:
@@ -149,7 +149,7 @@ class AIClient:
                     )
                     if _is_retryable(exc) and attempt < _RETRY_MAX:
                         logger.warning(
-                            "Percobaan %d gagal (HTTP %d), retry dalam %.0fs...",
+                            "[AI_CLIENT] Percobaan %d gagal (HTTP %d), retry dalam %.0fs...",
                             attempt + 1,
                             response.status_code,
                             _RETRY_BACKOFF,
@@ -159,14 +159,19 @@ class AIClient:
                         continue
                     raise exc
 
-                reply = _parse_response(response.json())
+                try:
+                    body = response.json()
+                except ValueError as exc:
+                    raise LLMClientError("Respons API bukan JSON valid") from exc
+
+                reply = _parse_response(body)
                 self._processed_messages += 1
                 return reply
 
-            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            except httpx.TransportError as exc:
                 if attempt < _RETRY_MAX:
                     logger.warning(
-                        "Percobaan %d gagal (%s), retry dalam %.0fs...",
+                        "[AI_CLIENT] Percobaan %d gagal (%s), retry dalam %.0fs...",
                         attempt + 1,
                         type(exc).__name__,
                         _RETRY_BACKOFF,
@@ -188,4 +193,4 @@ class AIClient:
         Must be called after all platform handlers have stopped.
         """
         await self._http.aclose()
-        logger.info("AIClient ditutup")
+        logger.info("[AI_CLIENT] AIClient ditutup")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -15,9 +16,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MAX_USERS = 1000
+
 # Conversation history keyed by Discord user_id.
 # Index 0 is always the system prompt — never evicted.
 _history: dict[int, list[dict]] = {}
+_user_locks: dict[int, asyncio.Lock] = {}
+_reset_seq: dict[int, int] = {}
 
 _SYSTEM_PROMPT: str | None = None
 _MAX_HISTORY: int = 10
@@ -39,8 +44,33 @@ def _get_system_prompt() -> str:
     return _SYSTEM_PROMPT
 
 
+def _get_user_lock(user_id: int) -> asyncio.Lock:
+    """Return a per-user asyncio.Lock, bounding total stored locks.
+
+    Args:
+        user_id: Discord user snowflake ID.
+
+    Returns:
+        asyncio.Lock for the given user.
+    """
+    lock = _user_locks.get(user_id)
+    if lock is not None:
+        return lock
+
+    if len(_user_locks) >= _MAX_USERS:
+        for old_uid, old_lock in list(_user_locks.items()):
+            if not old_lock.locked():
+                _user_locks.pop(old_uid, None)
+                _reset_seq.pop(old_uid, None)
+                break
+
+    lock = asyncio.Lock()
+    _user_locks[user_id] = lock
+    return lock
+
+
 def _ensure_history(user_id: int) -> None:
-    """Initialise history for a user if not yet present.
+    """Initialise history for a user if not yet present, bounding total users.
 
     Always inserts the system prompt at index 0.
 
@@ -48,6 +78,9 @@ def _ensure_history(user_id: int) -> None:
         user_id: Discord user snowflake ID.
     """
     if user_id not in _history:
+        if len(_history) >= _MAX_USERS:
+            oldest_uid = next(iter(_history))
+            _history.pop(oldest_uid, None)
         _history[user_id] = [{"role": "system", "content": _get_system_prompt()}]
 
 
@@ -59,6 +92,7 @@ def _append_and_evict(user_id: int, role: str, content: str) -> None:
         role: 'user' or 'assistant'.
         content: Message text.
     """
+    _ensure_history(user_id)
     _history[user_id].append({"role": role, "content": content})
     # Index 0 is system prompt — count only indices 1+
     while len(_history[user_id]) - 1 > _MAX_HISTORY:
@@ -138,43 +172,44 @@ def setup_handler(
             )
             return
 
-        _ensure_history(user_id)
-        _append_and_evict(user_id, "user", pertanyaan)
-
         # Defer response for app command / slash commands to prevent timeout (max 3s)
         if ctx.interaction:
             await ctx.interaction.response.defer()
 
-        try:
-            # Show typing indicator for prefix commands
-            if not ctx.interaction:
-                async with ctx.typing():
-                    jawaban = await ai_client.chat(_history[user_id])
-            else:
-                jawaban = await ai_client.chat(_history[user_id])
+        async with _get_user_lock(user_id):
+            seq_before = _reset_seq.get(user_id, 0)
+            _ensure_history(user_id)
+            request_messages = [*_history[user_id], {"role": "user", "content": pertanyaan}]
 
-        except LLMClientError as exc:
-            logger.error("[DISCORD] LLM error untuk user %d: %s", user_id, exc)
-            # Roll back the user message that failed
-            _history[user_id].pop()
-            err_msg = "Waduh, gagal dapat respons dari AI. Coba lagi nanti."
-            if ctx.interaction:
-                await ctx.interaction.followup.send(err_msg, ephemeral=True)
-            else:
-                await ctx.send(err_msg)
-            return
+            try:
+                # Show typing indicator for prefix commands
+                if not ctx.interaction:
+                    async with ctx.typing():
+                        jawaban = await ai_client.chat(request_messages)
+                else:
+                    jawaban = await ai_client.chat(request_messages)
 
-        _append_and_evict(user_id, "assistant", jawaban)
+            except LLMClientError as exc:
+                logger.error("[DISCORD] LLM error untuk user %d: %s", user_id, exc)
+                err_msg = "Waduh, gagal dapat respons dari AI. Coba lagi nanti."
+                if ctx.interaction:
+                    await ctx.interaction.followup.send(err_msg, ephemeral=True)
+                else:
+                    await ctx.send(err_msg)
+                return
+
+            if _reset_seq.get(user_id, 0) == seq_before:
+                _append_and_evict(user_id, "user", pertanyaan)
+                _append_and_evict(user_id, "assistant", jawaban)
+
         logger.info("[DISCORD] Menjawab user %d (%d chars)", user_id, len(jawaban))
 
         # Check embed limit (Discord limits embed description to 4096 characters)
         if len(jawaban) > 4096:
             # Fallback to plain text split if body > 4096
             if ctx.interaction:
-                # Send first chunk in deferred response
-                await ctx.interaction.followup.send(jawaban[:2000])
-                for i in range(2000, len(jawaban), 2000):
-                    await ctx.channel.send(jawaban[i : i + 2000])
+                for i in range(0, len(jawaban), 2000):
+                    await ctx.interaction.followup.send(jawaban[i : i + 2000])
             else:
                 for i in range(0, len(jawaban), 2000):
                     await ctx.send(jawaban[i : i + 2000])
@@ -183,7 +218,7 @@ def setup_handler(
                 description=jawaban,
                 color=discord.Color.blue(),
             )
-            embed.set_footer(text="by. TanyaBot")
+            embed.set_footer(text=f"Model: {ai_client.model}")
             if ctx.interaction:
                 await ctx.interaction.followup.send(embed=embed)
             else:
@@ -197,6 +232,7 @@ def setup_handler(
             ctx: Discord command context.
         """
         user_id = ctx.author.id
+        _reset_seq[user_id] = _reset_seq.get(user_id, 0) + 1
         _history.pop(user_id, None)
         logger.info("[DISCORD] History user %d direset", user_id)
         msg = "History percakapan kamu sudah direset."
@@ -239,11 +275,16 @@ def setup_handler(
     ) -> None:
         # Check command context to avoid crash on hybrid commands errors
         if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("Kasih pertanyaannya dong! Contoh: `!tanya apa itu AI?`", ephemeral=True)
+            msg = "Kasih pertanyaannya dong! Contoh: `!tanya apa itu AI?`"
         elif isinstance(error, commands.CommandNotFound):
-            pass  # Abaikan command tidak dikenal
+            return  # Abaikan command tidak dikenal
         else:
             logger.error("[DISCORD] Command error: %s", error)
-            await ctx.send("Ada error teknis. Coba lagi nanti.", ephemeral=True)
+            msg = "Ada error teknis. Coba lagi nanti."
+
+        if ctx.interaction and ctx.interaction.response.is_done():
+            await ctx.interaction.followup.send(msg, ephemeral=True)
+        else:
+            await ctx.send(msg, ephemeral=True)
 
     return bot

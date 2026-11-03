@@ -33,6 +33,9 @@ def _configure_logging() -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
         stream=sys.stdout,
     )
+    # Prevent httpx/httpcore from logging full request URLs containing TELEGRAM_TOKEN
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def _load_discord_token() -> str:
@@ -151,12 +154,21 @@ async def _run_bots(
         await telegram_app.updater.start_polling()
         logger.info("[TELEGRAM] Bot online dan polling dimulai")
 
-        # Discord runs as background task
+        # Discord runs as task monitored alongside shutdown_event
         discord_task = asyncio.create_task(discord_bot.start(discord_token))
-        logger.info("[DISCORD] Bot online")
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
 
-        # Keep running until SIGTERM/SIGINT sets the event
-        await shutdown_event.wait()
+        done, _ = await asyncio.wait(
+            [discord_task, shutdown_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        discord_exc: BaseException | None = None
+        if discord_task in done and not shutdown_event.is_set():
+            discord_exc = discord_task.exception()
+            logger.error("[DISCORD] Task berhenti tak terduga: %s", discord_exc)
+
+        shutdown_task.cancel()
 
         # Graceful shutdown order: Discord -> Telegram
         logger.info("[BOT] Shutdown: Menghentikan Discord bot...")
@@ -169,6 +181,9 @@ async def _run_bots(
         logger.info("[BOT] Shutdown: Menghentikan Telegram application...")
         await telegram_app.updater.stop()
         await telegram_app.stop()
+
+        if discord_exc is not None:
+            raise discord_exc
 
 
 async def main() -> None:

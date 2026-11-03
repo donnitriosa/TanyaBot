@@ -1,0 +1,25 @@
+# Environment & secrets
+env/
+
+# Python virtual environment & caches
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Git & IDE/agent metadata
+.git/
+.gitignore
+.claude/
+
+# Docs & logs
+*.md
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
