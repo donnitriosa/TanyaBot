@@ -382,11 +382,10 @@ async def _cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     uptime_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     processed = ai_client.processed_messages
-    safe_model = html.escape(ai_client.model)
 
     teks = (
         f"🤖 <b>AI Bot Info</b>\n\n"
-        f"• Model: <code>{safe_model}</code>\n"
+        f"• Model: <code>********</code>\n"
         f"• Uptime: <code>{uptime_str}</code>\n"
         f"• Pesan Diproses: <code>{processed}</code>"
     )

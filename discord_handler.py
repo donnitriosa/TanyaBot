@@ -259,7 +259,7 @@ def setup_handler(
             title="🤖 AI Bot Info",
             color=discord.Color.blue(),
         )
-        embed.add_field(name="Model", value=f"`{ai_client.model}`", inline=True)
+        embed.add_field(name="Model", value="`********`", inline=True)
         embed.add_field(name="Uptime", value=f"`{uptime_str}`", inline=True)
         embed.add_field(name="Pesan Diproses", value=f"`{processed}`", inline=True)
 
