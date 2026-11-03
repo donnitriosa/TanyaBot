@@ -377,7 +377,17 @@ async def _cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if update.effective_user.id not in _admin_user_ids:
-        await update.message.reply_text("Saya adalah TanyaBot, asisten AI yang membantu.")
+        public_info = (
+            "I am TanyaBot, a helpful AI assistant designed to assist you with a wide variety "
+            "of tasks and conversations.\n\n"
+            "Here are a few things I can help you with:\n\n"
+            "• Answering questions: From general knowledge, history, and science to everyday curiosities.\n\n"
+            "• Writing & editing: Drafting emails, essays, creative stories, summaries, or polishing your own writing.\n\n"
+            "• Brainstorming: Generating creative ideas, planning projects, or organizing thoughts.\n\n"
+            "• Learning & problem-solving: Explaining complex concepts in simple terms, assisting with coding/technical topics, and language learning.\n\n"
+            "Is there a specific topic you're curious about or a project you're currently working on? I'd be happy to help!"
+        )
+        await update.message.reply_text(public_info)
         return
 
     ai_client: AIClient = context.bot_data["ai_client"]
