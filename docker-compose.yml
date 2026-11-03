@@ -24,14 +24,8 @@ services:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
     networks:
-      - internal_net
+      - dokploy-network
 
 networks:
-  internal_net:
-    name: internal_net
-    driver: bridge
-    driver_opts:
-      com.docker.network.driver.mtu: 1280
-    ipam:
-      config:
-        - subnet: 172.20.0.0/24
+  dokploy-network:
+    external: true
